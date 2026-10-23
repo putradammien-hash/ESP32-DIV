@@ -49,7 +49,7 @@ jobs:
           NimBLE-Arduino|1.4.1
           arduinoFFT|1.6.1
           IRremoteESP8266|2.8.6
-          RCSwitch|
+          rc-switch|
           RF24|
           XPT2046_Touchscreen|
           PCF8574 library|
