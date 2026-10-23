@@ -1,0 +1,81 @@
+name: Build CYD firmware
+
+# Jalankan manual: GitHub -> tab Actions -> "Build CYD firmware" -> Run workflow
+# Juga otomatis setiap ada push yang mengubah kode firmware.
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "ESP32-DIV/**"
+      - "Libraries/**"
+      - ".github/workflows/build-cyd.yml"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install arduino-cli
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Install ESP32 core 2.0.10 (versi wajib proyek ini)
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config add board_manager.additional_urls https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+          arduino-cli core update-index
+          arduino-cli core install esp32:esp32@2.0.10
+
+      - name: Pakai platform.txt khusus dari repo
+        run: |
+          P="$HOME/.arduino15/packages/esp32/hardware/esp32/2.0.10/platform.txt"
+          cp Libraries/platform.txt "$P"
+          sed -i "s/^version=.*/version=2.0.10/" "$P"
+
+      - name: Install library dari Library Manager
+        run: |
+          arduino-cli lib install "ArduinoJson@6.21.5"
+          arduino-cli lib install "NimBLE-Arduino@1.4.1"
+          arduino-cli lib install "arduinoFFT@1.6.1"
+          arduino-cli lib install "IRremoteESP8266@2.8.6"
+          arduino-cli lib install "RCSwitch"
+          arduino-cli lib install "RF24"
+          arduino-cli lib install "XPT2046_Touchscreen"
+          arduino-cli lib install "PCF8574 library"
+          arduino-cli lib install "Adafruit PN532"
+
+      - name: Pasang library khusus dari repo (TFT_eSPI + SmartRC)
+        run: |
+          L="$HOME/Arduino/libraries"
+          mkdir -p "$L"
+          unzip -q Libraries/TFT_eSPI-master.zip -d "$L"
+          unzip -q Libraries/SmartRC-CC1101-Driver-Lib-master.zip -d "$L"
+          cp "Libraries/User_Setup cyd.h" "$L/TFT_eSPI-master/User_Setup.h"
+
+      - name: Pilih board CYD di BoardConfig.h
+        run: |
+          sed -i -e "1,12s|^// #define BOARD_CYD|#define BOARD_CYD|" \
+                 -e "1,12s|^#define BOARD_ESP32_DIV_V2|// #define BOARD_ESP32_DIV_V2|" ESP32-DIV/BoardConfig.h
+          grep -n "define BOARD" ESP32-DIV/BoardConfig.h | head -5
+
+      - name: Compile
+        run: |
+          arduino-cli compile \
+            --fqbn "esp32:esp32:esp32:PartitionScheme=min_spiffs" \
+            --warnings none \
+            --output-dir build \
+            ESP32-DIV 2>&1 | tee build.log
+          ls -la build
+
+      - name: Upload firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: ESP32-DIV-cyd-firmware
+          path: build/*.bin
+
+      - name: Upload log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
