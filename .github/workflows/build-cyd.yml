@@ -34,15 +34,32 @@ jobs:
 
       - name: Install library dari Library Manager
         run: |
-          arduino-cli lib install "ArduinoJson@6.21.5"
-          arduino-cli lib install "NimBLE-Arduino@1.4.1"
-          arduino-cli lib install "arduinoFFT@1.6.1"
-          arduino-cli lib install "IRremoteESP8266@2.8.6"
-          arduino-cli lib install "RCSwitch"
-          arduino-cli lib install "RF24"
-          arduino-cli lib install "XPT2046_Touchscreen"
-          arduino-cli lib install "PCF8574 library"
-          arduino-cli lib install "Adafruit PN532"
+          arduino-cli lib update-index
+          set +e
+          FAILED=""
+          while IFS="|" read -r name ver; do
+            [ -z "$name" ] && continue
+            if [ -n "$ver" ] && arduino-cli lib install "$name@$ver"; then
+              continue
+            fi
+            echo "::warning::$name@$ver gagal, coba versi terbaru"
+            arduino-cli lib install "$name" || FAILED="$FAILED [$name]"
+          done <<LIBS
+          ArduinoJson|6.21.5
+          NimBLE-Arduino|1.4.1
+          arduinoFFT|1.6.1
+          IRremoteESP8266|2.8.6
+          RCSwitch|
+          RF24|
+          XPT2046_Touchscreen|
+          PCF8574 library|
+          Adafruit PN532|
+          LIBS
+          arduino-cli lib list
+          if [ -n "$FAILED" ]; then
+            echo "GAGAL install:$FAILED"
+            exit 1
+          fi
 
       - name: Pasang library khusus dari repo (TFT_eSPI + SmartRC)
         run: |
