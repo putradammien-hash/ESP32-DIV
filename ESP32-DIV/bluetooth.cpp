@@ -2765,6 +2765,21 @@ static bool upsertHit(const uint8_t mac[6], int8_t rssi, uint8_t threat,
   return true;
 }
 
+static std::string advNameByType(BLEAdvertisedDevice* d, uint8_t type) {
+  uint8_t* pl = d->getPayload();
+  size_t len = d->getPayloadLength();
+  size_t i = 0;
+  while (pl && i + 1 < len) {
+    uint8_t l = pl[i];
+    if (l == 0 || i + 1 + l > len) break;
+    if (pl[i + 1] == type && l > 1) {
+      return std::string((char*)&pl[i + 2], l - 1);
+    }
+    i += l + 1;
+  }
+  return std::string();
+}
+
 static void extractName(BLEAdvertisedDevice* device, char* out, size_t outSz) {
   out[0] = '\0';
   if (!device || outSz < 2) {
@@ -2772,10 +2787,10 @@ static void extractName(BLEAdvertisedDevice* device, char* out, size_t outSz) {
   }
   std::string n = device->getName();
   if (n.empty()) {
-    n = device->getPayloadByType(0x09);
+    n = advNameByType(device, 0x09);
   }
   if (n.empty()) {
-    n = device->getPayloadByType(0x08);
+    n = advNameByType(device, 0x08);
   }
   if (n.empty()) {
     return;
