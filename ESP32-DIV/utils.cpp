@@ -5,6 +5,7 @@
 #include <vector>
 #include "driver/gpio.h"
 #include "Touchscreen.h"
+#include "TouchCal.h"
 #include "config.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -3095,62 +3096,13 @@ void loop() {
 } // namespace SdFileManager
 
 namespace TouchCalib {
-static int stepIdx = 0;
-static uint16_t xs[4], ys[4];
-static const int pts[4][2] = { {20,20}, {TFT_WIDTH-20,20}, {TFT_WIDTH-20,TFT_HEIGHT-20}, {20,TFT_HEIGHT-20} };
-
-static void drawTarget(int x,int y){
-  tft.fillScreen(UI_BG);
-  tft.drawCircle(x,y,10,UI_ICON);
-  tft.drawLine(x-14,y, x+14,y, UI_ICON);
-  tft.drawLine(x,y-14, x,y+14, UI_ICON);
-  tft.setCursor(70, 8);
-  tft.setTextColor(UI_TEXT, UI_BG);
-  tft.print("Touch the target");
-}
-
+// Kalibrasi 4 titik + simpan ke NVS (lihat TouchCal.cpp).
 void setup(){
-  stepIdx=0;
-  drawTarget(pts[0][0], pts[0][1]);
+  touchCalRun(true);
+  feature_exit_requested = true;
 }
 
 void loop(){
-  if (stepIdx>=4){
-    uint16_t xMin = min(xs[0], xs[3]);
-    uint16_t xMax = max(xs[1], xs[2]);
-    uint16_t yMin = min(ys[0], ys[1]);
-    uint16_t yMax = max(ys[2], ys[3]);
-    auto& s = settings();
-    s.touchXMin = xMin; s.touchXMax = xMax;
-#if defined(BOARD_CYD)
-    s.touchYMin = yMin; s.touchYMax = yMax;
-#else
-    s.touchYMin = yMax; s.touchYMax = yMin;
-#endif
-
-    bool ok = settingsSave();
-
-    tft.fillScreen(UI_BG);
-    tft.setTextColor(ok ? UI.ok : UI.warn, UI_BG);
-    tft.setCursor(70, 8);
-    tft.print(ok ? "Calibration Saved" : "Save FAILED");
-
-    tft.setTextColor(UI_TEXT, UI_BG);
-    tft.setCursor(70,28);
-    tft.printf("X:[%u..%u] Y:[%u..%u]", xMin,xMax,yMin,yMax);
-
-    delay(1200);
-    feature_exit_requested = true;
-    return;
-  }
-
-  int16_t rx = 0, ry = 0;
-  if (readTouchRawXY(rx, ry)) {
-    xs[stepIdx] = (uint16_t)rx;
-    ys[stepIdx] = (uint16_t)ry;
-    stepIdx++;
-    if (stepIdx<4) drawTarget(pts[stepIdx][0], pts[stepIdx][1]);
-  }
-  delay(100);
+  feature_exit_requested = true;
 }
 }

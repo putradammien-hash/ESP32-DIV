@@ -4,6 +4,7 @@
 #include <Wire.h>
 #include "SettingsStore.h"
 #include "Touchscreen.h"
+#include "TouchCal.h"
 #include "config.h"
 #include "ducky.h"
 #include "icon.h"
@@ -4568,6 +4569,9 @@ void setup() {
 #else
   // Keep boot lightweight on ESP32 — status bar updates from loop() instead.
 #endif
+
+  // Muat kalibrasi touch dari NVS (kalibrasi otomatis di boot pertama pada CYD).
+  touchCalBoot();
 
   menu_initialized = false;
   currentBatteryVoltage = readBatteryVoltage();
