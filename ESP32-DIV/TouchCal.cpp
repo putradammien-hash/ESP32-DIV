@@ -1,15 +1,15 @@
 #include "TouchCal.h"
+#include "TouchCalMath.h"
 
 #include <Preferences.h>
 #include <TFT_eSPI.h>
-#include "SettingsStore.h"
 #include "Touchscreen.h"
 #include "shared.h"
 
 extern TFT_eSPI tft;
 
 #define TOUCHCAL_NS   "touchcal"
-#define TOUCHCAL_VER  1
+#define TOUCHCAL_VER  2          // v1 = format min/max lama (tidak kompatibel -> kalibrasi ulang sekali)
 
 #ifndef TOUCHCAL_AUTO_FIRST_BOOT
 #if defined(BOARD_CYD)
@@ -23,65 +23,80 @@ extern TFT_eSPI tft;
 #define TOUCHCAL_HOLD_TO_RECAL_MS 1200
 #endif
 
-/* ───────────────────────── NVS ───────────────────────── */
+#define TC_BG   TFT_BLACK
+#define TC_FG   TFT_MAGENTA      // warna panah, sama seperti contoh Touch_calibrate TFT_eSPI
+#define TC_TEXT TFT_WHITE
 
-static bool spanSane(uint16_t a, uint16_t b) {
-  if (a > 4095 || b > 4095) return false;
-  return abs((int)b - (int)a) >= 1200;
+/* Parameter aktif (format sama dengan tft.setTouch(calData)) */
+static uint16_t s_cal[5] = {0, 0, 0, 0, 0};
+static bool     s_calValid = false;
+
+bool touchCalIsValid() {
+  return s_calValid;
 }
 
+bool touchCalConvert(int16_t rawX, int16_t rawY, int& x, int& y) {
+  if (!s_calValid) return false;
+  touchCalConvertRaw(s_cal, rawX, rawY, TFT_WIDTH, TFT_HEIGHT, x, y);
+  return true;
+}
+
+/* ───────────────────────── NVS ───────────────────────── */
+
 bool touchCalLoadNvs() {
+  s_calValid = false;
+
   Preferences p;
   if (!p.begin(TOUCHCAL_NS, true)) {      // namespace belum ada
     return false;
   }
 
-  bool ok = false;
   if (p.getUChar("ver", 0) == TOUCHCAL_VER && p.getBool("valid", false)) {
     String board = p.getString("board", "");
     uint8_t rot  = p.getUChar("rot", 255);
     if (board == TOUCH_PROFILE_ID && rot == (uint8_t)TFT_ROTATION) {
-      uint16_t xMin = p.getUShort("xmin", 0);
-      uint16_t xMax = p.getUShort("xmax", 0);
-      uint16_t yMin = p.getUShort("ymin", 0);
-      uint16_t yMax = p.getUShort("ymax", 0);
-      if (spanSane(xMin, xMax) && spanSane(yMin, yMax)) {
-        auto& s = settings();
-        s.touchXMin = xMin;
-        s.touchXMax = xMax;
-        s.touchYMin = yMin;
-        s.touchYMax = yMax;
-        ok = true;
+      uint16_t c[5];
+      c[0] = p.getUShort("x0", 0);
+      c[1] = p.getUShort("xr", 0);
+      c[2] = p.getUShort("y0", 0);
+      c[3] = p.getUShort("yr", 0);
+      c[4] = p.getUShort("flg", 0xFFFF);
+      if (touchCalParamsSane(c)) {
+        for (int i = 0; i < 5; i++) s_cal[i] = c[i];
+        s_calValid = true;
       }
     }
   }
   p.end();
-  return ok;
+  return s_calValid;
 }
 
 bool touchCalSaveNvs() {
+  if (!s_calValid) return false;
+
   Preferences p;
   if (!p.begin(TOUCHCAL_NS, false)) {
     return false;
   }
-  auto& s = settings();
+  p.clear();                               // buang format lama / sisa data
   bool ok = true;
-  p.putBool("valid", false);               // tandai tidak valid selama menulis
-  ok &= p.putUShort("xmin", s.touchXMin) > 0;
-  ok &= p.putUShort("xmax", s.touchXMax) > 0;
-  ok &= p.putUShort("ymin", s.touchYMin) > 0;
-  ok &= p.putUShort("ymax", s.touchYMax) > 0;
+  ok &= p.putUShort("x0",  s_cal[0]) > 0;
+  ok &= p.putUShort("xr",  s_cal[1]) > 0;
+  ok &= p.putUShort("y0",  s_cal[2]) > 0;
+  ok &= p.putUShort("yr",  s_cal[3]) > 0;
+  ok &= p.putUShort("flg", s_cal[4]) > 0;
   ok &= p.putString("board", TOUCH_PROFILE_ID) > 0;
   ok &= p.putUChar("rot", (uint8_t)TFT_ROTATION) > 0;
   ok &= p.putUChar("ver", TOUCHCAL_VER) > 0;
   if (ok) {
-    ok &= p.putBool("valid", true) > 0;
+    ok &= p.putBool("valid", true) > 0;    // ditulis terakhir: data setengah jadi tidak dipakai
   }
   p.end();
   return ok;
 }
 
 bool touchCalClearNvs() {
+  s_calValid = false;
   Preferences p;
   if (!p.begin(TOUCHCAL_NS, false)) {
     return false;
@@ -112,7 +127,7 @@ static void waitRelease() {
   bool quiet = false;
   uint32_t quietSince = 0;
   while (millis() - t0 < 3000) {
-    if (isTouchDown(200)) {
+    if (isTouchDown(150)) {
       quiet = false;
     } else {
       if (!quiet) { quiet = true; quietSince = millis(); }
@@ -122,13 +137,17 @@ static void waitRelease() {
   }
 }
 
-/** Tunggu sentuhan, ambil banyak sampel, pakai median. false bila timeout. */
+/**
+ * Tunggu sentuhan di sudut, ambil banyak sampel dan pakai median.
+ * (TFT_eSPI: 8 sampel dirata-rata, threshold dikurangi karena sudut kurang sensitif.)
+ */
 static bool captureRaw(int16_t& ox, int16_t& oy, uint32_t timeoutMs) {
   const int N = 24;
+  const uint16_t Z = 150;                       // lebih rendah: sudut kurang sensitif
   const uint32_t t0 = millis();
   while (millis() - t0 < timeoutMs) {
     int16_t x = 0, y = 0;
-    if (!readTouchRawXY(x, y, 300)) {
+    if (!readTouchRawXY(x, y, Z)) {
       delay(10);
       continue;
     }
@@ -138,7 +157,7 @@ static bool captureRaw(int16_t& ox, int16_t& oy, uint32_t timeoutMs) {
     int n = 0, misses = 0;
     const uint32_t t1 = millis();
     while (n < N && millis() - t1 < 500) {
-      if (readTouchRawXY(x, y, 300)) {
+      if (readTouchRawXY(x, y, Z)) {
         xs[n] = x;
         ys[n] = y;
         n++;
@@ -147,7 +166,7 @@ static bool captureRaw(int16_t& ox, int16_t& oy, uint32_t timeoutMs) {
       }
       delay(8);
     }
-    if (n >= 12) {
+    if (n >= 8) {
       ox = medianOf(xs, n);
       oy = medianOf(ys, n);
       return true;
@@ -159,31 +178,54 @@ static bool captureRaw(int16_t& ox, int16_t& oy, uint32_t timeoutMs) {
 
 /* ───────────────────────── Tampilan ───────────────────────── */
 
-static void drawTarget(int x, int y, int step) {
-  const int W = tft.width();
-  tft.fillScreen(UI_BG);
-  tft.drawCircle(x, y, 10, UI_ICON);
-  tft.drawCircle(x, y, 4, UI_ICON);
-  tft.drawLine(x - 16, y, x + 16, y, UI_ICON);
-  tft.drawLine(x, y - 16, x, y + 16, UI_ICON);
+/** Panah di sudut i (0 kiri-atas, 1 kiri-bawah, 2 kanan-atas, 3 kanan-bawah) — sama dengan TFT_eSPI. */
+static void drawCornerArrow(int i) {
+  const int W = TFT_WIDTH;
+  const int H = TFT_HEIGHT;
+  const int sz = 15;
+
+  tft.fillScreen(TC_BG);
+  switch (i) {
+    case 0:
+      tft.drawLine(0, 0, 0, sz, TC_FG);
+      tft.drawLine(0, 0, sz, 0, TC_FG);
+      tft.drawLine(0, 0, sz, sz, TC_FG);
+      break;
+    case 1:
+      tft.drawLine(0, H - sz - 1, 0, H - 1, TC_FG);
+      tft.drawLine(0, H - 1, sz, H - 1, TC_FG);
+      tft.drawLine(sz, H - sz - 1, 0, H - 1, TC_FG);
+      break;
+    case 2:
+      tft.drawLine(W - sz - 1, 0, W - 1, 0, TC_FG);
+      tft.drawLine(W - sz - 1, sz, W - 1, 0, TC_FG);
+      tft.drawLine(W - 1, sz, W - 1, 0, TC_FG);
+      break;
+    default:
+      tft.drawLine(W - sz - 1, H - sz - 1, W - 1, H - 1, TC_FG);
+      tft.drawLine(W - 1, H - 1 - sz, W - 1, H - 1, TC_FG);
+      tft.drawLine(W - 1 - sz, H - 1, W - 1, H - 1, TC_FG);
+      break;
+  }
+
   tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(UI_TEXT, UI_BG);
-  tft.drawString("Touch Calibration", W / 2, tft.height() / 2 - 14, 2);
+  tft.setTextColor(TC_TEXT, TC_BG);
+  tft.drawString("Touch Calibration", W / 2, H / 2 - 14, 2);
   char buf[40];
-  snprintf(buf, sizeof(buf), "Tap the target (%d/4)", step);
-  tft.drawString(buf, W / 2, tft.height() / 2 + 8, 2);
+  snprintf(buf, sizeof(buf), "Tap the corner arrow (%d/4)", i + 1);
+  tft.drawString(buf, W / 2, H / 2 + 8, 2);
   tft.setTextDatum(TL_DATUM);
 }
 
 static void showMessage(const char* l1, const char* l2, uint16_t color, uint32_t ms) {
-  const int W = tft.width();
-  const int H = tft.height();
-  tft.fillScreen(UI_BG);
+  const int W = TFT_WIDTH;
+  const int H = TFT_HEIGHT;
+  tft.fillScreen(TC_BG);
   tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(color, UI_BG);
+  tft.setTextColor(color, TC_BG);
   tft.drawString(l1, W / 2, H / 2 - 12, 2);
   if (l2 && l2[0]) {
-    tft.setTextColor(UI_TEXT, UI_BG);
+    tft.setTextColor(TC_TEXT, TC_BG);
     tft.drawString(l2, W / 2, H / 2 + 12, 2);
   }
   tft.setTextDatum(TL_DATUM);
@@ -194,73 +236,31 @@ static void showMessage(const char* l1, const char* l2, uint16_t color, uint32_t
 
 bool touchCalRun(bool save) {
   setupTouchscreen();
-
-  const int W = tft.width();
-  const int H = tft.height();
-  const int m = 20;                              // jarak target dari tepi (px)
-  const int pts[4][2] = { {m, m}, {W - m, m}, {W - m, H - m}, {m, H - m} };
-
   waitRelease();
 
   for (int attempt = 0; attempt < 3; attempt++) {
-    int16_t rx[4], ry[4];
+    int32_t v[8] = {0, 0, 0, 0, 0, 0, 0, 0};
 
     for (int i = 0; i < 4; i++) {
-      drawTarget(pts[i][0], pts[i][1], i + 1);
-      if (!captureRaw(rx[i], ry[i], 30000)) {
+      drawCornerArrow(i);
+      int16_t rx = 0, ry = 0;
+      if (!captureRaw(rx, ry, 30000)) {
         showMessage("Calibration timeout", "Using previous values", UI_WARN, 1200);
         return false;
       }
+      v[i * 2]     = rx;
+      v[i * 2 + 1] = ry;
       waitRelease();
     }
 
-    // Rata-rata sisi kiri/kanan dan atas/bawah
-    const float xL = (rx[0] + rx[3]) / 2.0f;
-    const float xR = (rx[1] + rx[2]) / 2.0f;
-    const float yT = (ry[0] + ry[1]) / 2.0f;
-    const float yB = (ry[2] + ry[3]) / 2.0f;
-
-    // Titik kiri/kanan (atas/bawah) harus berdekatan; jika tidak -> salah sentuh
-    const bool consistent =
-        abs(rx[0] - rx[3]) < 700 && abs(rx[1] - rx[2]) < 700 &&
-        abs(ry[0] - ry[1]) < 700 && abs(ry[3] - ry[2]) < 700;
-
-    // Ekstrapolasi linear ke tepi layar sebenarnya (x=0..W-1, y=0..H-1),
-    // bukan hanya ke titik target yang berjarak m px dari tepi.
-    const float sx = (xR - xL) / (float)(W - 2 * m);
-    const float sy = (yB - yT) / (float)(H - 2 * m);
-    const float rawX0   = xL - sx * m;
-    const float rawXmax = xL + sx * (W - 1 - m);
-    const float rawYtop = yT - sy * m;
-    const float rawYbot = yT + sy * (H - 1 - m);
-
-    auto clampRaw = [](float v) -> uint16_t {
-      long r = lroundf(v);
-      if (r < 0) r = 0;
-      if (r > 4095) r = 4095;
-      return (uint16_t)r;
-    };
-
-    const uint16_t xMin = clampRaw(rawX0);
-    const uint16_t xMax = clampRaw(rawXmax);
-    const uint16_t yTop = clampRaw(rawYtop);
-    const uint16_t yBot = clampRaw(rawYbot);
-
-    if (!consistent || !spanSane(xMin, xMax) || !spanSane(yTop, yBot)) {
+    uint16_t params[5];
+    if (!touchCalComputeParams(v, params)) {
       showMessage("Calibration invalid", "Try again", UI_WARN, 1000);
       continue;
     }
 
-    auto& s = settings();
-    s.touchXMin = xMin;
-    s.touchXMax = xMax;
-#if defined(BOARD_CYD)
-    s.touchYMin = yTop;                          // map(rawY, YMin, YMax, 0, H-1)
-    s.touchYMax = yBot;
-#else
-    s.touchYMin = yBot;                          // map(rawY, YMax, YMin, 0, H-1)
-    s.touchYMax = yTop;
-#endif
+    for (int i = 0; i < 5; i++) s_cal[i] = params[i];
+    s_calValid = true;
 
     bool ok = true;
     if (save) {
@@ -268,10 +268,12 @@ bool touchCalRun(bool save) {
     }
 
     char line[48];
-    snprintf(line, sizeof(line), "X:%u..%u  Y:%u..%u", xMin, xMax, yTop, yBot);
+    snprintf(line, sizeof(line), "%u %u %u %u f%u", params[0], params[1], params[2], params[3], params[4]);
     showMessage(ok ? "Calibration saved" : "Applied (NVS save FAILED)", line,
                 ok ? UI.ok : UI_WARN, 1400);
-    Serial.printf("[touchcal] %s %s\n", ok ? "saved" : "NVS save failed", line);
+    Serial.printf("[touchcal] %s calData = { %u, %u, %u, %u, %u }\n",
+                  ok ? "saved" : "NVS save failed",
+                  params[0], params[1], params[2], params[3], params[4]);
     return true;
   }
 

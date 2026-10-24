@@ -1,5 +1,6 @@
 #include "SettingsStore.h"
 #include "Touchscreen.h"
+#include "TouchCal.h"
 #include <TFT_eSPI.h>
 
 extern TFT_eSPI tft;
@@ -123,6 +124,11 @@ bool readTouchRawXY(int16_t& x, int16_t& y, uint16_t zThresh) {
 }
 
 static void mapTouchToScreen(int16_t rawX, int16_t rawY, int& x, int& y) {
+  // Kalibrasi ala TFT_eSPI (disimpan di NVS) — dipakai bila sudah ada.
+  if (touchCalConvert(rawX, rawY, x, y)) {
+    return;
+  }
+  // Fallback: nilai min/max default / dari settings.
   auto& s = settings();
 #if defined(BOARD_CYD)
   // Same axis order as the RNT CYD touch test (no inverted Y).

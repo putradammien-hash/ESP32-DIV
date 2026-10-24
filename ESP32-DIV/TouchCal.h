@@ -1,10 +1,15 @@
 #pragma once
 /*
- * TouchCal — kalibrasi layar sentuh XPT2046 (4 titik) + penyimpanan di NVS.
+ * TouchCal — kalibrasi layar sentuh XPT2046 ala TFT_eSPI (Touch_calibrate) + NVS.
  *
- * - Hasil kalibrasi disimpan di NVS (namespace "touchcal"), jadi tetap ada
- *   setelah reboot / power-off dan TIDAK bergantung pada SD card.
- * - Boot pertama (belum ada data NVS) pada board CYD: kalibrasi otomatis.
+ * Mekanisme mengikuti TFT_eSPI::calibrateTouch()/setTouch():
+ *   - 4 sudut layar sebenarnya (panah kecil di tiap sudut)
+ *   - 5 parameter {x0, rentangX, y0, rentangY, flags(rotate/invertX/invertY)}
+ *   - deteksi otomatis sumbu tertukar / terbalik
+ * Bedanya: parameter disimpan di NVS (bukan SPIFFS) dan raw dibaca lewat
+ * XPT2046_Touchscreen karena touch CYD ada di bus SPI terpisah.
+ *
+ * - Boot pertama (NVS kosong) pada CYD: kalibrasi otomatis.
  * - Tahan layar ~1.2 detik saat boot untuk memaksa kalibrasi ulang.
  * - Menu Tools -> "Touch Calibrate" tetap bisa dipakai kapan saja.
  *
@@ -15,16 +20,22 @@
 
 #include <Arduino.h>
 
-/** Muat kalibrasi dari NVS ke settings(). true bila data valid dan dipakai. */
+/** Muat 5 parameter kalibrasi dari NVS. true bila data valid dan dipakai. */
 bool touchCalLoadNvs();
 
-/** Simpan nilai kalibrasi yang ada di settings() ke NVS. */
+/** Simpan parameter kalibrasi aktif ke NVS. */
 bool touchCalSaveNvs();
 
-/** Hapus kalibrasi dari NVS (boot berikutnya memakai default / kalibrasi ulang). */
+/** Hapus kalibrasi dari NVS dan dari memori (boot berikutnya kalibrasi ulang). */
 bool touchCalClearNvs();
 
-/** Kalibrasi 4 titik (blocking). Bila save=true hasilnya ditulis ke NVS. true bila sukses. */
+/** True bila ada kalibrasi valid yang aktif. */
+bool touchCalIsValid();
+
+/** Konversi raw -> piksel layar memakai kalibrasi aktif. false bila belum ada kalibrasi. */
+bool touchCalConvert(int16_t rawX, int16_t rawY, int& x, int& y);
+
+/** Kalibrasi 4 sudut (blocking). Bila save=true hasilnya ditulis ke NVS. true bila sukses. */
 bool touchCalRun(bool save = true);
 
 /** Panggil sekali di setup(): init touch, muat NVS, auto-kalibrasi / hold-to-recalibrate. */
